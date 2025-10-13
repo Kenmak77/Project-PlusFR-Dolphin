@@ -20,6 +20,11 @@
 #include <QMessageBox>
 #include <QByteArray>
 #include <QJsonDocument>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QDebug>
+#include <QIODevice>
 
 #include <fmt/format.h>
 
@@ -1358,77 +1363,109 @@ void MainWindow::ShowAboutDialog()
   about.exec();
 }
 
-// P+ change: New updater; credit to RainbowTabitha and the Mario Party Netplay team for the base code!
+static void MergeJson(QJsonObject& base, const QJsonObject& overrides)
+{
+    for (auto it = overrides.begin(); it != overrides.end(); ++it)
+    {
+        if (it->isObject() && base.contains(it.key()) && base[it.key()].isObject())
+        {
+            QJsonObject sub = base[it.key()].toObject();
+            MergeJson(sub, it->toObject());
+            base[it.key()] = sub;
+        }
+        else
+        {
+            base[it.key()] = it.value();
+        }
+    }
+}
 
-void MainWindow::ShowUpdateDialog()
+// Récupère et fusionne GitHub + ton JSON personnalisé
+static QJsonObject GetMergedUpdateJson()
 {
     Common::HttpRequest httpRequest;
 
-    // Make the GET request
-    auto response = httpRequest.Get("https://api.github.com/repos/Project-Plus-Development-Team/Project-Plus-Dolphin/releases/latest");
-
-    if (response)
+    // 🔹 Étape 1 : Récupération du JSON GitHub
+    auto githubResponse = httpRequest.Get("https://api.github.com/repos/Project-Plus-Development-Team/Project-Plus-Dolphin/releases/latest");
+    QJsonObject githubJson;
+    if (githubResponse)
     {
-        // Access the underlying vector and convert it to QByteArray
-        QByteArray responseData(reinterpret_cast<const char*>(response->data()), response->size());
+        QByteArray data(reinterpret_cast<const char*>(githubResponse->data()), githubResponse->size());
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        githubJson = doc.object();
+    }
 
-        // Parse the JSON response
-        QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);
-        QJsonObject jsonObject = jsonDoc.object();
-      
-        QString currentVersion = QString::fromStdString(SCM_DESC_STR);
-        QString latestVersion = jsonObject.value(QStringLiteral("tag_name")).toString();
-
-        if (currentVersion != latestVersion)
+    // 🔹 Étape 2 : Chargement de ton JSON custom (update2.json)
+    QJsonObject customJson;
+    auto customResponse = httpRequest.Get("https://update.pplusfr.org/update2.json");
+    if (customResponse)
+    {
+        QByteArray data(reinterpret_cast<const char*>(customResponse->data()), customResponse->size());
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (doc.isObject())
         {
-          // Create and show the UpdateDialog with the fetched data
-          bool forced = false; // Set this based on your logic
-          UserInterface::Dialog::UpdateDialog updater(this, jsonObject, forced);
-          updater.exec();
-        } else {
-          QMessageBox::information(this, tr("Info"), tr("You are already up to date."));
+            customJson = doc.object();
+            qDebug() << "✅ update2.json loaded and parsed successfully!";
         }
     }
     else
     {
-        // Handle error
+        qWarning() << "⚠️ Could not load update2.json from update.pplusfr.org";
+    }
+
+    // 🔹 Étape 3 : Fusion (ton JSON a priorité)
+    MergeJson(githubJson, customJson);
+    return githubJson;
+}
+
+
+// P+ change: New updater; credit to RainbowTabitha and the Mario Party Netplay team for the base code!
+
+void MainWindow::ShowUpdateDialog()
+{
+    // 🔹 Fusion GitHub + update2.json
+    QJsonObject jsonObject = GetMergedUpdateJson();
+
+    if (jsonObject.isEmpty())
+    {
         QMessageBox::critical(this, tr("Error"), tr("Failed to fetch update information."));
+        return;
+    }
+
+    QString currentVersion = QString::fromStdString(SCM_DESC_STR);
+    QString latestVersion = jsonObject.value(QStringLiteral("tag_name")).toString();
+
+    if (currentVersion != latestVersion)
+    {
+        bool forced = false;
+        UserInterface::Dialog::UpdateDialog updater(this, jsonObject, forced);
+        updater.exec();
+    }
+    else
+    {
+        QMessageBox::information(this, tr("Info"), tr("You are already up to date."));
     }
 }
 
 void MainWindow::CheckForUpdatesAuto()
 {
-    Common::HttpRequest httpRequest;
+    // 🔹 Même fusion automatique au démarrage
+    QJsonObject jsonObject = GetMergedUpdateJson();
 
-    // Make the GET request
-    auto response = httpRequest.Get("https://api.github.com/repos/Project-Plus-Development-Team/Project-Plus-Dolphin/releases/latest");
+    if (jsonObject.isEmpty())
+        return;
 
-    if (response)
+    QString currentVersion = QString::fromStdString(SCM_DESC_STR);
+    QString latestVersion = jsonObject.value(QStringLiteral("tag_name")).toString();
+
+    if (currentVersion != latestVersion)
     {
-        // Access the underlying vector and convert it to QByteArray
-        QByteArray responseData(reinterpret_cast<const char*>(response->data()), response->size());
-
-        // Parse the JSON response
-        QJsonDocument jsonDoc = QJsonDocument::fromJson(responseData);
-        QJsonObject jsonObject = jsonDoc.object();
-      
-        QString currentVersion = QString::fromStdString(SCM_DESC_STR);
-        QString latestVersion = jsonObject.value(QStringLiteral("tag_name")).toString();
-
-        if (currentVersion != latestVersion)
-        {
-          // Create and show the UpdateDialog with the fetched data
-          bool forced = false; // Set this based on your logic
-          UserInterface::Dialog::UpdateDialog updater(this, jsonObject, forced);
-          updater.exec();
-        }
-    }
-    else
-    {
-        // Handle error
-        QMessageBox::critical(this, tr("Error"), tr("Failed to fetch update information."));
+        bool forced = false;
+        UserInterface::Dialog::UpdateDialog updater(this, jsonObject, forced);
+        updater.exec();
     }
 }
+
 
 void MainWindow::ShowHotkeyDialog()
 {

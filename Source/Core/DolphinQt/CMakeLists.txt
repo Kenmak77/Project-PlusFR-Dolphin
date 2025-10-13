@@ -441,6 +441,7 @@ target_link_libraries(project-plus-dolphin
 PRIVATE
   core
   Qt6::Widgets
+  Qt6::Network
   uicommon
   imgui
   implot
@@ -695,3 +696,5 @@ if(USE_RETRO_ACHIEVEMENTS)
     target_compile_definitions(project-plus-dolphin PRIVATE -DRC_CLIENT_SUPPORTS_RAINTEGRATION)
   endif()
 endif()
+add_subdirectory(ProjectPlus)
+
