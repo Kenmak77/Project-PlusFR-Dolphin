@@ -12,7 +12,7 @@ class InstallUpdateDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit InstallUpdateDialog(QWidget *parent,
+    explicit InstallUpdateDialog(QWidget* parent,
                                  QString installationDirectory,
                                  QString temporaryDirectory,
                                  QString filename,
@@ -21,18 +21,22 @@ public:
     ~InstallUpdateDialog();
 
 protected:
-    void timerEvent(QTimerEvent *e) override;
+    void timerEvent(QTimerEvent* e) override;
     void closeEvent(QCloseEvent* event) override;
 
 private:
-    // === Fonctions principales ===
-    void ensureDependencies();
+    // === Étapes principales ===
     void ensureDependenciesThen(std::function<void()> cont);
-    void download();
-    void install();
     void checkIfAllDownloadsFinished(bool sdFinished, bool sdSuccess);
+    void download();                // ✅ manquait
+    void startSDDownload();         // ✅ manquait
+    void install();
+    bool m_isClosing = false;
+    bool unzipFile(const std::string& zipFilePath,
+                   const std::string& destDir,
+                   std::function<void(int, int)> progressCallback);
 
-    // === Fonctions internes de fallback ===
+    // === Fallbacks ===
     void startRcloneFallback(const QString& sdUrl,
                              const QString& sdPath,
                              std::shared_ptr<bool> sdFinished,
@@ -47,11 +51,6 @@ private:
                            std::function<void(int, const QString&)> uiProgress,
                            std::function<void(bool, const QString&)> uiDone);
 
-    // === Outils ===
-    bool unzipFile(const std::string& zipFilePath,
-                   const std::string& destDir,
-                   std::function<void(int, int)> progressCallback);
-
 private:
     // === Variables ===
     QString installationDirectory;
@@ -60,8 +59,11 @@ private:
     QString downloadUrl;
     QString m_sdUrl;
 
+    QThread* m_hashThread = nullptr;
+
     QLabel* label;
     QLabel* stepLabel;
+
     QProgressBar* progressBar;
     QProgressBar* stepProgressBar;
 };

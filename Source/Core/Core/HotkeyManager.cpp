@@ -458,7 +458,10 @@ void HotkeyManager::LoadDefaults(const ControllerInterface& ciface)
   set_key_expression(HK_COLLAPSE_CHAT, "LEFT");
   set_key_expression(HK_EXPAND_CHAT, "RIGHT");
   set_key_expression(HK_STOP, "ESCAPE");
-  set_key_expression(HK_FULLSCREEN, hotkey_string({"Alt", "RETURN"}));
+  set_key_expression(
+    HK_FULLSCREEN,
+    hotkey_string({"Alt", "RETURN"}) + std::string(" | ") + hotkey_string({"F11"})
+);
 #else
   set_key_expression(HK_VOLUME_DOWN, "Down");
   set_key_expression(HK_VOLUME_UP, "Up");
@@ -470,7 +473,7 @@ void HotkeyManager::LoadDefaults(const ControllerInterface& ciface)
 #ifdef USE_RETRO_ACHIEVEMENTS
   set_key_expression(HK_OPEN_ACHIEVEMENTS, hotkey_string({"Alt", "A"}));
 #endif  // USE_RETRO_ACHIEVEMENTS
-  set_key_expression(HK_STEP, "F11");
+  set_key_expression(HK_STEP, "");
   set_key_expression(HK_STEP_OVER, hotkey_string({"Shift", "F10"}));
   set_key_expression(HK_STEP_OUT, hotkey_string({"Shift", "F11"}));
   set_key_expression(HK_BP_TOGGLE, hotkey_string({"Shift", "F9"}));

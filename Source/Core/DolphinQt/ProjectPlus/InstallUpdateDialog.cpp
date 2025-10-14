@@ -29,7 +29,12 @@
 #include <QEventLoop>
 #include <QElapsedTimer>
 #include <QDebug>
-
+#include <QCryptographicHash>
+#include <QJsonDocument>
+#include <QUrl>
+#include <QCryptographicHash>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "Common/HttpRequest.h"
 
 #include <mz.h>
@@ -80,7 +85,7 @@ void InstallUpdateDialog::ensureDependenciesThen(std::function<void()> cont)
         "Write-Host 'DONE'"
     );
 
-    connect(ps, &QProcess::readyReadStandardOutput, this, [ps]() {
+    connect(ps, &QProcess::readyReadStandardOutput, this, [this, ps]() {
         const QString out = QString::fromUtf8(ps->readAllStandardOutput()).trimmed();
         if (!out.isEmpty())
             qDebug().noquote() << "[scoop]" << out;
@@ -211,32 +216,71 @@ void InstallUpdateDialog::checkIfAllDownloadsFinished(bool sdFinished, bool sdSu
                                           temporaryDirectory + QDir::separator() + filename);
         worker->moveToThread(thread);
 
-        connect(thread, &QThread::started, worker, &DownloadWorker::startDownload);
+        connect(thread, &QThread::started, worker, &DownloadWorker::startDownload); 
 
-        connect(worker, &DownloadWorker::progressUpdated, this, [this](qint64 done, qint64 total) {
-            if (total <= 0)
-                return;
-            const int percent = static_cast<int>((done * 100) / total);
-            stepProgressBar->setValue(percent);
-            stepLabel->setText(QStringLiteral("Downloading main ZIP: %1%").arg(percent));
+        static double zipDisplayed = 50.0;  // valeur affichée
+static double zipTarget    = 50.0;  // cible à atteindre
+static QTimer* zipAnimTimer = nullptr;
 
-            // 🔹 Fait progresser la barre principale entre 50 et 100 %
-            progressBar->setValue(50 + percent / 2);
-        });
+// Démarre l’anim une seule fois
+if (!zipAnimTimer)
+{
+    zipAnimTimer = new QTimer(this);
+    zipAnimTimer->setInterval(30); // ~33 FPS
+    connect(zipAnimTimer, &QTimer::timeout, this, [this]() {
+        // interpolation lissée vers la cible
+        zipDisplayed += (zipTarget - zipDisplayed) * 0.15;  // 0.10 = plus doux, 0.25 = plus réactif
+        progressBar->setValue(static_cast<int>(zipDisplayed));
+    });
+    zipAnimTimer->start();
+}
 
-        connect(worker, &DownloadWorker::finished, this, [=]() {
-            qDebug().noquote() << "✅ Main ZIP download finished";
-            zipDone = true;
+// valeur de départ à 50% quand on commence l’étape 2
+zipDisplayed = 50.0;
+zipTarget    = 50.0;
+progressBar->setValue(50);
 
-            thread->quit();
-            worker->deleteLater();
-            thread->deleteLater();
+      connect(worker, &DownloadWorker::progressUpdated, this, [this](qint64 done, qint64 total) {
+    if (total <= 0) return;
 
-            // ✅ Passage à l’installation
-            QMetaObject::invokeMethod(this, [=]() {
-                this->checkIfAllDownloadsFinished(true, true);
-            }, Qt::QueuedConnection);
-        });
+    const int localPercent = static_cast<int>((done * 100) / total);
+
+    // barre d’étape (celle du bas) = progression du ZIP
+    stepProgressBar->setValue(localPercent);
+    stepLabel->setText(QStringLiteral("Step 2/2: Downloading ZIP (%1%)").arg(localPercent));
+
+    // barre globale (haut) : cible entre 50 et 100
+    // 50 + (0..100)*0.5  =>  50..100
+    zipTarget = 50.0 + (static_cast<double>(localPercent) * 0.5);
+});
+
+       connect(worker, &DownloadWorker::finished, this, [=]() {
+    qDebug().noquote() << "✅ Main ZIP download finished";
+    stepLabel->setText(QStringLiteral("ZIP download complete"));
+    stepProgressBar->setValue(75);
+
+    // 💫 Amène la cible à 100% (la barre globale va s’animer jusqu’à 100)
+    zipTarget = 100.0;
+
+    // Sécurité : après 400 ms, on s’assure qu’elle est bien à 100%
+    QTimer::singleShot(400, this, [this]() {
+      if (m_isClosing) return; // ✅ sécurité
+        progressBar->setValue(100);
+    });
+
+    zipDone = true;
+
+    thread->quit();
+    worker->deleteLater();
+    thread->deleteLater();
+
+    // ✅ Passage à l’installation après un petit délai (le temps que la barre termine son anim)
+    QTimer::singleShot(500, this, [this]() {
+      if (m_isClosing) return; // ✅ sécurité
+        this->checkIfAllDownloadsFinished(true, true);
+    });
+});
+
 
         connect(worker, &DownloadWorker::errorOccurred, this, [=](const QString& err) {
             qWarning().noquote() << "❌ ZIP download failed:" << err;
@@ -263,25 +307,163 @@ void InstallUpdateDialog::checkIfAllDownloadsFinished(bool sdFinished, bool sdSu
 }
 
 
-// --------------------- TELECHARGEMENT ----------------------
 void InstallUpdateDialog::download()
 {
-    label->setText(QStringLiteral("Step 1/2: Downloading SD card..."));
+    label->setText(QStringLiteral("Step 1/2: Checking SD card..."));
     progressBar->setRange(0, 100);
     stepProgressBar->setRange(0, 100);
+    progressBar->setValue(0);
+    stepProgressBar->setValue(0);
+    stepLabel->setText(QStringLiteral("Checking local SD hash..."));
+
+    const QString sdPath = QDir::toNativeSeparators(
+        QCoreApplication::applicationDirPath() + QStringLiteral("/User/Wii/sd.raw"));
+
+    // ✅ Si la SD existe localement → calcul hash dans un thread
+    if (QFile::exists(sdPath))
+    {
+        qDebug().noquote() << "🔍 SD.raw found locally at:" << sdPath;
+
+        stepLabel->setText(QStringLiteral("Computing SD hash..."));
+        stepProgressBar->setRange(0, 0); // indéterminée
+
+        // ⚙️ Thread de calcul du hash
+        m_hashThread = QThread::create([this, sdPath]() {
+            QFile sdFile(sdPath);
+            QString localHash;
+            if (sdFile.open(QIODevice::ReadOnly))
+            {
+                QCryptographicHash hash(QCryptographicHash::Sha256);
+                constexpr qint64 chunkSize = 4 * 1024 * 1024; // 4 Mo
+                QByteArray buffer;
+                buffer.resize(chunkSize);
+
+                qint64 totalSize = sdFile.size();
+                qint64 sampleSize = 256ll * 1024 * 1024; // 256 Mo
+
+                // --- Début du fichier ---
+                sdFile.seek(0);
+                qint64 bytesRead = 0;
+                while (bytesRead < sampleSize && !sdFile.atEnd())
+                {
+                    qint64 n = sdFile.read(buffer.data(), chunkSize);
+                    if (n <= 0) break;
+                    hash.addData(buffer.constData(), n);
+                    bytesRead += n;
+                }
+
+                // --- Fin du fichier ---
+                if (totalSize > sampleSize)
+                {
+                    sdFile.seek(qMax(0ll, totalSize - sampleSize));
+                    bytesRead = 0;
+                    while (!sdFile.atEnd() && bytesRead < sampleSize)
+                    {
+                        qint64 n = sdFile.read(buffer.data(), chunkSize);
+                        if (n <= 0) break;
+                        hash.addData(buffer.constData(), n);
+                        bytesRead += n;
+                    }
+                }
+
+                localHash = QString::fromLatin1(hash.result().toHex());
+                sdFile.close();
+            }
+
+            // ✅ Vérifie que la fenêtre est encore ouverte
+            if (m_isClosing)
+                return;
+
+            // 🔹 Retour au thread principal
+            QMetaObject::invokeMethod(QApplication::instance(), [this, localHash]() {
+                if (m_isClosing)
+                    return; // sécurité
+
+                qDebug().noquote() << "💠 Local SD hash =" << localHash;
+                stepProgressBar->setRange(0, 100);
+                stepProgressBar->setValue(100);
+                stepLabel->setText(QStringLiteral("Hash check complete!"));
+
+                // 🔹 Compare avec le hash distant
+                const QString hashUrl = QStringLiteral("https://update.pplusfr.org/update2.json");
+                Common::HttpRequest req;
+                auto response = req.Get(hashUrl.toStdString());
+
+                if (!response.has_value())
+                {
+                    qWarning().noquote() << "⚠️ Failed to fetch" << hashUrl;
+                    stepLabel->setText(QStringLiteral("⚠️ Failed to fetch update.json"));
+                    return;
+                }
+
+                const QByteArray jsonBytes(reinterpret_cast<const char*>(response->data()),
+                                           static_cast<int>(response->size()));
+                const QJsonDocument jsonDoc = QJsonDocument::fromJson(jsonBytes);
+                if (!jsonDoc.isObject())
+                {
+                    qWarning().noquote() << "⚠️ Invalid JSON from" << hashUrl;
+                    return;
+                }
+
+                const QJsonObject obj = jsonDoc.object();
+                const QString remoteHash = obj.value(QStringLiteral("sd-hash-partial")).toString();
+
+                qDebug().noquote() << "🌐 Remote SD hash (partial) =" << remoteHash;
+
+                if (!remoteHash.isEmpty() &&
+                    QString::compare(remoteHash, localHash, Qt::CaseInsensitive) == 0)
+                {
+                    qDebug().noquote() << "✅ SD already up to date, skipping SD download.";
+                    progressBar->setValue(50);
+                    stepProgressBar->setValue(100);
+                    stepLabel->setText(QStringLiteral("SD is up to date — skipping download"));
+                    QTimer::singleShot(300, this, [this]() {
+                        if (m_isClosing) return;
+                        this->checkIfAllDownloadsFinished(true, true);
+                    });
+                    return;
+                }
+
+                qDebug().noquote() << "⚠️ SD outdated — re-downloading...";
+                stepLabel->setText(QStringLiteral("Downloading new SD..."));
+                progressBar->setValue(25);
+                stepProgressBar->setValue(0);
+
+                this->startSDDownload();
+            });
+        });
+
+        // 🔹 Nettoyage du thread si la fenêtre est fermée
+        connect(this, &QObject::destroyed, this, [this]() {
+            if (m_hashThread && m_hashThread->isRunning()) {
+                qDebug().noquote() << "🧵 Stopping hash thread (window closed)";
+                m_hashThread->requestInterruption();
+                m_hashThread->quit();
+                m_hashThread->wait(1000);
+                m_hashThread = nullptr;
+            }
+        });
+
+        m_hashThread->start();
+        return;
+    }
+
+    // -------------------- Aucun fichier SD local → téléchargement direct --------------------
+    qDebug().noquote() << "⚠️ No SD.raw found locally → will download.";
+    label->setText(QStringLiteral("Step 1/2: Downloading SD card..."));
     stepLabel->setText(QStringLiteral("0% Downloaded..."));
     progressBar->setValue(0);
     stepProgressBar->setValue(0);
 
-    if (!hasEnoughFreeSpace(QDir::tempPath(), 8LL * 1024 * 1024 * 1024))
-    {
-        QMessageBox::critical(this, QStringLiteral("Error"),
-                              QStringLiteral("You need at least 8 GB free space to install this update."));
-        reject();
-        return;
-    }
+    this->startSDDownload(); // télécharge directement
+}
 
-    // 🔸 NEW: wait for dependencies (aria2c/rclone)
+
+
+
+void InstallUpdateDialog::startSDDownload()
+{
+    // Vérifie que aria2c/rclone sont prêts avant de lancer
     ensureDependenciesThen([=]() {
         const QString sdUrl = m_sdUrl;
         if (sdUrl.isEmpty())
@@ -303,20 +485,24 @@ void InstallUpdateDialog::download()
         }
 
         auto sdFinished = std::make_shared<bool>(false);
-        auto sdSuccess = std::make_shared<bool>(false);
+        auto sdSuccess  = std::make_shared<bool>(false);
 
         auto uiProgress = [this](int p, const QString& t)
         {
-            stepProgressBar->setValue(qBound(0, p, 100));
+            const int clamped = qBound(0, p, 100);
+            stepProgressBar->setValue(clamped);
             stepLabel->setText(t);
+            progressBar->setValue(clamped / 2); // 0..50%
         };
+
         auto uiDone = [this](bool ok, const QString& t)
         {
             stepProgressBar->setValue(ok ? 100 : 0);
             stepLabel->setText(t);
+            if (ok) progressBar->setValue(50);
         };
 
-        // 1️⃣ Try aria2c if available
+        // 1) aria2c si dispo
         const QString ariaPath = QStandardPaths::findExecutable(QStringLiteral("aria2c"));
         if (!ariaPath.isEmpty())
         {
@@ -346,7 +532,7 @@ void InstallUpdateDialog::download()
                 if (m.hasMatch())
                 {
                     int percent = qBound(0, m.captured(1).toInt(), 100);
-                    QString speed = m.captured(2).trimmed();
+                    const QString speed = m.captured(2).trimmed();
                     uiProgress(percent, QStringLiteral("aria2c: %1% (%2/s)").arg(percent).arg(speed));
                 }
             });
@@ -354,13 +540,12 @@ void InstallUpdateDialog::download()
             connect(aria, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
                     this, [=](int code, QProcess::ExitStatus) {
                 QFileInfo fi(sdPath);
-                bool ok = (code == 0 && fi.exists() && fi.size() > (10 * 1024 * 1024));
+                const bool ok = (code == 0 && fi.exists() && fi.size() > (10 * 1024 * 1024));
 
                 if (ok)
                 {
                     qDebug().noquote() << "✅ SD download succeeded with aria2c";
-                    *sdFinished = true;
-                    *sdSuccess = true;
+                    *sdFinished = true; *sdSuccess = true;
                     uiDone(true, QStringLiteral("🎉 SD download complete (aria2c)!"));
                     QMetaObject::invokeMethod(this, [=]() {
                         this->checkIfAllDownloadsFinished(*sdFinished, *sdSuccess);
@@ -380,7 +565,7 @@ void InstallUpdateDialog::download()
             return;
         }
 
-        // 2️⃣ Try rclone (it will fallback to HTTPS inside)
+        // 2) rclone sinon (et il fallback vers HTTPS dans ta fonction)
         const QString rclonePath = QStandardPaths::findExecutable(QStringLiteral("rclone"));
         if (!rclonePath.isEmpty())
         {
@@ -389,15 +574,12 @@ void InstallUpdateDialog::download()
         }
         else
         {
-            // 3️⃣ If neither exists → fallback to HTTP directly
+            // 3) HTTP direct si rien
             qWarning().noquote() << "⚠️ Neither aria2c nor rclone found → switching to HTTPS fallback...";
             startHttpFallback(sdUrl, sdPath, sdFinished, sdSuccess, uiProgress, uiDone);
         }
-    }); // ✅ ferme le lambda
-} // ✅ ferme la fonction
-
-
-
+    });
+}
 
 
 // --------------------- RCLONE FALLBACK (corrigé et optimisé) ----------------------
@@ -674,116 +856,86 @@ void InstallUpdateDialog::install()
         return;
     }
 
-    stepProgressBar->setValue(50);
-    progressBar->setValue(50);
     label->setText(QStringLiteral("Step 2/2: Installing update..."));
-    progressBar->setValue(50);
-stepLabel->setText(QStringLiteral("Extracting files..."));
-progressBar->setValue(50);
-stepProgressBar->setValue(50);
+    stepLabel->setText(QStringLiteral("Extracting files..."));
+    stepProgressBar->setValue(0);
+    progressBar->setValue(75);
 
+    // --- Thread d’extraction sans parent ---
+    QThread* thread = new QThread(nullptr);
 
-    // --- Extraction ZIP via minizip ---
-    bool success = unzipFile(zipFile.toStdString(), destDir.toStdString(),
-        [this](int current, int total)
-        {
-            int percent = (total > 0) ? (current * 100 / total) : 0;
-            stepProgressBar->setValue(percent);
-            stepLabel->setText(QStringLiteral("Extracting: %1%").arg(percent));
-        });
+    connect(thread, &QThread::started, this, [this, zipFile, destDir, thread]() {
+        bool success = unzipFile(zipFile.toStdString(), destDir.toStdString(),
+            [this](int current, int total)
+            {
+                const int percent = (total > 0) ? (current * 100 / total) : 0;
 
-    if (!success)
-    {
-        QMessageBox::critical(this, QStringLiteral("Error"),
-                              QStringLiteral("Failed to extract ZIP file."));
-        reject();
-        return;
-    }
+                // ➜ on repasse toujours par le thread UI
+                QMetaObject::invokeMethod(QApplication::instance(), [=]() {
+                    stepProgressBar->setValue(percent);
+                    stepLabel->setText(QStringLiteral("Extracting: %1%").arg(percent));
+                    progressBar->setValue(75 + (percent * 0.25));
+                }, Qt::QueuedConnection);
+            });
 
-    QFile::remove(zipFile);
-    qDebug().noquote() << QStringLiteral("✅ ZIP extracted and deleted.");
+        QMetaObject::invokeMethod(QApplication::instance(), [=]() {
+            thread->quit();
+            thread->deleteLater();
 
-    stepLabel->setText(QStringLiteral("Installation complete!"));
-    stepProgressBar->setValue(100);
-    progressBar->setValue(100);
+            if (!success)
+            {
+                QMessageBox::critical(nullptr, QStringLiteral("Error"),
+                                      QStringLiteral("Failed to extract ZIP file."));
+                return;
+            }
 
-       qDebug().noquote() << QStringLiteral("✅ Installation complete → restarting Dolphin...");
+            QFile::remove(zipFile);
+            qDebug().noquote() << QStringLiteral("✅ ZIP extracted and deleted.");
+
+            stepLabel->setText(QStringLiteral("Installation complete!"));
+            stepProgressBar->setValue(100);
+            progressBar->setValue(100);
 
 #ifdef _WIN32
-    const QString exe = QDir::toNativeSeparators(
-        installationDirectory + QDir::separator() + QStringLiteral("Dolphin.exe"));
+            const QString exe = QDir::toNativeSeparators(
+                installationDirectory + QDir::separator() + QStringLiteral("Dolphin.exe"));
 #else
-    const QString exe = QDir::toNativeSeparators(
-        installationDirectory + QDir::separator() + QStringLiteral("Dolphin"));
+            const QString exe = QDir::toNativeSeparators(
+                installationDirectory + QDir::separator() + QStringLiteral("Dolphin"));
 #endif
 
-    if (!QFile::exists(exe))
+            if (!QFile::exists(exe))
+            {
+                QMessageBox::information(nullptr, QStringLiteral("Done"),
+                                         QStringLiteral("Installation finished. Launch manually."));
+                return;
+            }
+
+            qDebug().noquote() << QStringLiteral("♻️ Restarting Dolphin...");
+
+// ✅ Ferme proprement la fenêtre d’installation
+this->accept(); // ferme le QDialog
+
+// ✅ Relance Dolphin après 400 ms
+QTimer::singleShot(400, nullptr, [exe]() {
+    qDebug().noquote() << "🔁 Launching Dolphin again:" << exe;
+
+    bool ok = QProcess::startDetached(exe, QCoreApplication::arguments());
+    if (!ok)
     {
-        QMessageBox::information(this, QStringLiteral("Done"),
-                                 QStringLiteral("Installation finished. Launch manually."));
-        accept();
-        return;
-    }
-
-#ifdef _WIN32
-    const QString appPid = QString::number(QCoreApplication::applicationPid());
-    const QString tempDir = QDir::toNativeSeparators(QDir::tempPath());
-    const QString scriptPath = QDir(tempDir).filePath(QStringLiteral("restart_dolphin.bat")); // ✅ plus sûr
-
-    QStringList scriptLines = {
-        QStringLiteral("@echo off"),
-        QStringLiteral("echo == Closing Dolphin PID %1").arg(appPid),
-        QStringLiteral("taskkill /F /PID %1 >nul 2>&1").arg(appPid),
-        QStringLiteral("timeout /t 1 >nul"),
-        QStringLiteral("echo == Relaunching Dolphin..."),
-        QStringLiteral("start \"\" \"%1\"").arg(exe),
-        QStringLiteral("echo == Cleanup"),
-        QStringLiteral("del \"%1\" >nul 2>&1").arg(scriptPath),
-        QStringLiteral("exit")
-    };
-
-    QFile scriptFile(scriptPath);
-    if (scriptFile.open(QIODevice::WriteOnly | QIODevice::Text))
-    {
-        QTextStream out(&scriptFile);
-        for (const QString& line : scriptLines)
-            out << line << QLatin1Char('\n'); // ✅ évite conversion implicite
-        scriptFile.close();
-    }
-    else
-    {
-        QMessageBox::warning(this, QStringLiteral("Error"),
-                             QStringLiteral("Failed to create restart script."));
-        return;
-    }
-
-    SHELLEXECUTEINFO sei = {0};
-    sei.cbSize = sizeof(SHELLEXECUTEINFO);
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE;
-    sei.hwnd = nullptr;
-    sei.lpVerb = L"runas";
-    sei.lpFile = reinterpret_cast<LPCWSTR>(scriptPath.utf16());
-    sei.lpParameters = nullptr;
-    sei.lpDirectory = nullptr;
-    sei.nShow = SW_HIDE;
-
-    if (!ShellExecuteEx(&sei))
-    {
-        QMessageBox::critical(this, QStringLiteral("Error"),
-                              QStringLiteral("Failed to launch restart script as administrator."));
-    }
-
-    QCoreApplication::quit();
-#else
-    qDebug().noquote() << "♻️ Restarting Dolphin (Linux/macOS)...";
-    if (!QProcess::startDetached(exe, QCoreApplication::arguments()))
-    {
-        QMessageBox::warning(this, QStringLiteral("Restart failed"),
+        QMessageBox::warning(nullptr, QStringLiteral("Restart failed"),
                              QStringLiteral("Failed to relaunch Dolphin automatically.\nPlease restart manually."));
     }
-    QCoreApplication::quit();
-#endif
+
+    // Ferme complètement l’application actuelle
+    QCoreApplication::exit(0);
+});
+        }, Qt::QueuedConnection);
+    });
+
+    thread->start();
 }
+
 
 
 
@@ -806,6 +958,7 @@ bool InstallUpdateDialog::unzipFile(const std::string& zipFilePath,
         return false;
     }
 
+    // 🔹 Compte total des fichiers dans l’archive
     int total = 0;
     {
         void* tmp = mz_zip_reader_create();
@@ -821,6 +974,24 @@ bool InstallUpdateDialog::unzipFile(const std::string& zipFilePath,
 
     int current = 0;
     int err = mz_zip_reader_goto_first_entry(reader);
+
+    // ⚙️ Configuration de l’animation fluide de la barre globale (progressBar)
+    static double extractDisplayed = 50.0;
+    static double extractTarget = 50.0;
+    static QTimer* extractTimer = nullptr;
+
+    if (!extractTimer)
+    {
+        extractTimer = new QTimer(this);
+        extractTimer->setInterval(30); // environ 33 FPS
+        connect(extractTimer, &QTimer::timeout, this, [this]() {
+            // interpolation douce vers la cible
+            extractDisplayed += (extractTarget - extractDisplayed) * 0.15;
+            progressBar->setValue(static_cast<int>(extractDisplayed));
+        });
+        extractTimer->start();
+    }
+
     while (err == MZ_OK)
     {
         err = mz_zip_reader_entry_open(reader);
@@ -846,6 +1017,16 @@ bool InstallUpdateDialog::unzipFile(const std::string& zipFilePath,
             }
 
             current++;
+            int percent = (total > 0) ? (current * 100 / total) : 0;
+
+            // 🔹 Barre d’étape (en bas)
+            stepProgressBar->setValue(percent);
+            stepLabel->setText(QStringLiteral("Extracting: %1%").arg(percent));
+
+            // 🔹 Barre globale (fluide) → 50 → 100 %
+            extractTarget = 50.0 + (percent * 0.5);
+
+            // Callback éventuel (si défini ailleurs)
             if (progressCallback)
                 progressCallback(current, total);
         }
@@ -856,23 +1037,79 @@ bool InstallUpdateDialog::unzipFile(const std::string& zipFilePath,
 
     mz_zip_reader_close(reader);
     mz_zip_reader_delete(&reader);
+
+    // 🔚 Termine proprement la progression à 100 %
+     if (extractTimer)
+    {
+        extractTimer->stop();
+        extractTimer->deleteLater();
+        extractTimer = nullptr;
+    }
+
+    progressBar->setValue(100);
+    stepProgressBar->setValue(100);
+    stepLabel->setText(QStringLiteral("Extraction complete"));
+
     return true;
 }
 
+
 void InstallUpdateDialog::closeEvent(QCloseEvent* event)
 {
-    // Tuer proprement tous les sous-processus actifs (aria2c, rclone, PowerShell, curl)
+    if (m_isClosing)
+        return;
+
+    m_isClosing = true;
+    qDebug().noquote() << "🛑 User requested to close update dialog.";
+
+    setEnabled(false);
+
+    // Annule tout ce qui pourrait déclencher un invokeMethod(this, …)
+    disconnect(this, nullptr, nullptr, nullptr);
+
+    // 🔹 Tuer tous les sous-processus (aria2c, rclone, PowerShell, etc.)
     const auto processes = findChildren<QProcess*>();
     for (QProcess* p : processes)
     {
         if (p && p->state() != QProcess::NotRunning)
         {
-            qDebug().noquote() << "🛑 Killing running process:" << p->program();
+            qDebug().noquote() << "🧨 Killing process:" << p->program();
             disconnect(p, nullptr, this, nullptr);
             p->kill();
-            p->waitForFinished(1000);
+            if (!p->waitForFinished(1000))
+                p->terminate();
         }
     }
 
+    // 🔹 Stoppe proprement les threads
+    const auto threads = findChildren<QThread*>();
+    for (QThread* t : threads)
+    {
+        if (t && t->isRunning())
+        {
+            qDebug().noquote() << "🧵 Stopping thread:" << t;
+            disconnect(t, nullptr, this, nullptr);
+            t->requestInterruption();
+            t->quit();
+            t->wait(1000);
+        }
+    }
+
+    // 🔹 Supprime les timers (pour éviter les callbacks post-fermeture)
+    const auto timers = findChildren<QTimer*>();
+    for (QTimer* timer : timers)
+    {
+        if (timer)
+        {
+            qDebug().noquote() << "⏱️ Deleting timer";
+            timer->stop();
+            disconnect(timer, nullptr, this, nullptr);
+            timer->deleteLater();
+        }
+    }
+
+    qDebug().noquote() << "✅ Update dialog closed safely.";
     QDialog::closeEvent(event);
 }
+
+
