@@ -309,6 +309,18 @@ progressBar->setValue(50);
 
 void InstallUpdateDialog::download()
 {
+  const qint64 minRequiredBytes = 8ll * 1024 * 1024 * 1024; // 8 Go
+if (!hasEnoughFreeSpace(installationDirectory, minRequiredBytes))
+{
+    QMessageBox::critical(this,
+        QStringLiteral("Not enough space"),
+        QStringLiteral("You need at least 8 GB of free space to install this update.\n\n"
+                       "Please free some disk space and try again."));
+    qWarning().noquote() << "❌ Not enough free space. Aborting update.";
+    reject();
+    return;
+}
+
     label->setText(QStringLiteral("Step 1/2: Checking SD card..."));
     progressBar->setRange(0, 100);
     stepProgressBar->setRange(0, 100);
@@ -565,6 +577,16 @@ void InstallUpdateDialog::startSDDownload()
             return;
         }
 
+        static int ariaRetryCount = 0;
+if (ariaRetryCount < 1) {
+    ariaRetryCount++;
+    qWarning().noquote() << "⚠️ aria2c failed — retrying once...";
+    QTimer::singleShot(1000, this, [=]() {
+        startSDDownload(); // retente
+    });
+    return;
+}
+
         // 2) rclone sinon (et il fallback vers HTTPS dans ta fonction)
         const QString rclonePath = QStandardPaths::findExecutable(QStringLiteral("rclone"));
         if (!rclonePath.isEmpty())
@@ -600,19 +622,19 @@ void InstallUpdateDialog::startRcloneFallback(const QString& sdUrl,
 
     // ⚙️ Commande rclone optimisée
     QStringList rargs = {
-        QStringLiteral("copyto"),
-        QStringLiteral(":http:%1").arg(fileName),
-        QDir::toNativeSeparators(sdPath),
-        QStringLiteral("--http-url"), baseUrl,
-        QStringLiteral("--multi-thread-streams=8"),
-        QStringLiteral("--multi-thread-cutoff=1M"),
-        QStringLiteral("--buffer-size=64M"),
-        QStringLiteral("--transfers=4"),
-        QStringLiteral("--no-check-certificate"),
-        QStringLiteral("--progress"),
-        QStringLiteral("--retries=2"),
-        QStringLiteral("--low-level-retries=3")
-    };
+    QStringLiteral("copyto"),
+    QStringLiteral(":http:%1").arg(fileName),
+    QDir::toNativeSeparators(sdPath),
+    QStringLiteral("--http-url"), baseUrl,
+    QStringLiteral("--multi-thread-streams=4"),
+    QStringLiteral("--multi-thread-cutoff=16M"),
+    QStringLiteral("--buffer-size=128M"),
+    QStringLiteral("--transfers=2"),
+    QStringLiteral("--low-level-retries=5"),
+    QStringLiteral("--checkers=4"),
+    QStringLiteral("--retries=3"),
+    QStringLiteral("--progress")
+};
 
     qDebug().noquote() << "🚀 Launching rclone:" << rargs.join(QLatin1Char(' '));
 
@@ -845,8 +867,9 @@ void InstallUpdateDialog::install()
 {
     qDebug().noquote() << QStringLiteral("🧩 Starting installation...");
 
+    // ✅ Extraction dans un dossier temporaire local (dans le dossier Dolphin)
+    const QString tmpDir = installationDirectory + QDir::separator() + QStringLiteral("update_tmp");
     const QString zipFile = temporaryDirectory + QDir::separator() + filename;
-    const QString destDir = installationDirectory;
 
     if (!QFile::exists(zipFile))
     {
@@ -856,21 +879,22 @@ void InstallUpdateDialog::install()
         return;
     }
 
+    QDir().mkpath(tmpDir);
+
     label->setText(QStringLiteral("Step 2/2: Installing update..."));
     stepLabel->setText(QStringLiteral("Extracting files..."));
     stepProgressBar->setValue(0);
     progressBar->setValue(75);
 
-    // --- Thread d’extraction sans parent ---
+    // --- Thread d’extraction ---
     QThread* thread = new QThread(nullptr);
 
-    connect(thread, &QThread::started, this, [this, zipFile, destDir, thread]() {
-        bool success = unzipFile(zipFile.toStdString(), destDir.toStdString(),
+    connect(thread, &QThread::started, this, [this, zipFile, tmpDir, thread]() {
+        bool success = unzipFile(zipFile.toStdString(), tmpDir.toStdString(),
             [this](int current, int total)
             {
                 const int percent = (total > 0) ? (current * 100 / total) : 0;
 
-                // ➜ on repasse toujours par le thread UI
                 QMetaObject::invokeMethod(QApplication::instance(), [=]() {
                     stepProgressBar->setValue(percent);
                     stepLabel->setText(QStringLiteral("Extracting: %1%").arg(percent));
@@ -890,9 +914,9 @@ void InstallUpdateDialog::install()
             }
 
             QFile::remove(zipFile);
-            qDebug().noquote() << QStringLiteral("✅ ZIP extracted and deleted.");
+            qDebug().noquote() << QStringLiteral("✅ ZIP extracted to temporary folder:") << tmpDir;
 
-            stepLabel->setText(QStringLiteral("Installation complete!"));
+            stepLabel->setText(QStringLiteral("Finalizing update..."));
             stepProgressBar->setValue(100);
             progressBar->setValue(100);
 
@@ -911,30 +935,49 @@ void InstallUpdateDialog::install()
                 return;
             }
 
-            qDebug().noquote() << QStringLiteral("♻️ Restarting Dolphin...");
+            qDebug().noquote() << QStringLiteral("♻️ Preparing for restart...");
 
-// ✅ Ferme proprement la fenêtre d’installation
-this->accept(); // ferme le QDialog
+            // ✅ Ferme la fenêtre de l’installeur
+            this->accept();
 
-// ✅ Relance Dolphin après 400 ms
-QTimer::singleShot(400, nullptr, [exe]() {
-    qDebug().noquote() << "🔁 Launching Dolphin again:" << exe;
+#ifdef _WIN32
+    // ⚙️ Script PowerShell pour déplacer le contenu de update_tmp et relancer Dolphin
+    QString psScript = QStringLiteral(
+        "$tmp = '%1';"
+        "$dest = '%2';"
+        "Start-Sleep -Milliseconds 500;"
+        "Stop-Process -Name 'Dolphin' -Force -ErrorAction SilentlyContinue;"
+        "Start-Sleep -Milliseconds 300;"
+        "Get-ChildItem -Path $tmp -Recurse | Move-Item -Destination $dest -Force;"
+        "Remove-Item -Path $tmp -Recurse -Force;"
+        "Start-Process \"$dest\\Dolphin.exe\";"
+    ).arg(QDir::toNativeSeparators(tmpDir),
+          QDir::toNativeSeparators(installationDirectory));
 
-    bool ok = QProcess::startDetached(exe, QCoreApplication::arguments());
-    if (!ok)
-    {
-        QMessageBox::warning(nullptr, QStringLiteral("Restart failed"),
-                             QStringLiteral("Failed to relaunch Dolphin automatically.\nPlease restart manually."));
-    }
+    qDebug().noquote() << QStringLiteral("🚀 Launching PowerShell update finalizer...");
 
-    // Ferme complètement l’application actuelle
-    QCoreApplication::exit(0);
-});
+QProcess::startDetached(QStringLiteral("powershell"),
+    QStringList()
+        << QStringLiteral("-NoProfile")
+        << QStringLiteral("-ExecutionPolicy") << QStringLiteral("Bypass")
+        << QStringLiteral("-Command") << psScript);
+#else
+    // Linux/macOS: déplace et relance
+    QProcess::startDetached(QStringLiteral("/bin/sh"),
+        QStringList()
+            << QStringLiteral("-c")
+            << QStringLiteral("sleep 0.5 && mv -f '%1'/* '%2'/ && rm -rf '%1' && '%2'/Dolphin &")
+                   .arg(tmpDir, installationDirectory));
+#endif
+
+            // ✅ Quitte immédiatement Dolphin pour permettre le déplacement
+            QCoreApplication::quit();
         }, Qt::QueuedConnection);
     });
 
     thread->start();
 }
+
 
 
 
@@ -1094,6 +1137,21 @@ void InstallUpdateDialog::closeEvent(QCloseEvent* event)
             t->wait(1000);
         }
     }
+
+    // 🔹 Nettoyage des fichiers temporaires rclone (sd.raw.*)
+{
+    const QString userWiiPath = QDir::toNativeSeparators(
+        QCoreApplication::applicationDirPath() + QStringLiteral("/User/Wii"));
+    QDir dir(userWiiPath);
+
+    QStringList partials = dir.entryList(QStringList() << QStringLiteral("sd.raw.*"), QDir::Files);
+    for (const QString& file : partials)
+    {
+        QString fullPath = dir.filePath(file);
+        qDebug().noquote() << "🧹 Removing leftover partial file:" << fullPath;
+        QFile::remove(fullPath);
+    }
+}
 
     // 🔹 Supprime les timers (pour éviter les callbacks post-fermeture)
     const auto timers = findChildren<QTimer*>();
