@@ -941,37 +941,52 @@ void InstallUpdateDialog::install()
             this->accept();
 
 #ifdef _WIN32
-    // ⚙️ Script PowerShell pour déplacer le contenu de update_tmp et relancer Dolphin
-    QString psScript = QStringLiteral(
-        "$tmp = '%1';"
-        "$dest = '%2';"
-        "Start-Sleep -Milliseconds 500;"
-        "Stop-Process -Name 'Dolphin' -Force -ErrorAction SilentlyContinue;"
-        "Start-Sleep -Milliseconds 300;"
-        "Get-ChildItem -Path $tmp -Recurse | Move-Item -Destination $dest -Force;"
-        "Remove-Item -Path $tmp -Recurse -Force;"
-        "Start-Process \"$dest\\Dolphin.exe\";"
-    ).arg(QDir::toNativeSeparators(tmpDir),
-          QDir::toNativeSeparators(installationDirectory));
+// ⚙️ Script PowerShell pour remplacer tous les fichiers pendant que Dolphin est fermé
+QString psScript = QStringLiteral(R"(
+    $tmp = "%1";
+    $dest = "%2";
 
-    qDebug().noquote() << QStringLiteral("🚀 Launching PowerShell update finalizer...");
+    Start-Sleep -Seconds 1;
 
-QProcess::startDetached(QStringLiteral("powershell"),
+    # 🔪 Ferme tout process Dolphin encore actif
+    Get-Process "Dolphin" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue;
+    Start-Sleep -Seconds 1;
+
+    Write-Host "🚚 Moving update files from $tmp to $dest...";
+    robocopy $tmp $dest /E /MOVE /R:3 /W:1 | Out-Null;
+
+    # 🧹 Supprime le dossier temporaire si encore là
+    if (Test-Path $tmp) { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+
+    Write-Host "✅ Update applied. Restarting Dolphin...";
+    Start-Process "$dest\\Dolphin.exe";
+)") // fin du script inline PowerShell
+.arg(QDir::toNativeSeparators(tmpDir),
+     QDir::toNativeSeparators(installationDirectory));
+
+qDebug().noquote() << QStringLiteral("🚀 Launching PowerShell update finalizer...");
+
+QProcess::startDetached(
+    QStringLiteral("powershell.exe"),
     QStringList()
         << QStringLiteral("-NoProfile")
         << QStringLiteral("-ExecutionPolicy") << QStringLiteral("Bypass")
-        << QStringLiteral("-Command") << psScript);
+        << QStringLiteral("-Command") << psScript
+);
 #else
-    // Linux/macOS: déplace et relance
-    QProcess::startDetached(QStringLiteral("/bin/sh"),
-        QStringList()
-            << QStringLiteral("-c")
-            << QStringLiteral("sleep 0.5 && mv -f '%1'/* '%2'/ && rm -rf '%1' && '%2'/Dolphin &")
-                   .arg(tmpDir, installationDirectory));
+// 🐧 Linux/macOS : même principe
+QProcess::startDetached(
+    QStringLiteral("/bin/sh"),
+    QStringList()
+        << QStringLiteral("-c")
+        << QString("sleep 1 && mv -f '%1'/* '%2'/ && rm -rf '%1' && '%2'/Dolphin &")
+               .arg(tmpDir, installationDirectory)
+);
 #endif
 
-            // ✅ Quitte immédiatement Dolphin pour permettre le déplacement
-            QCoreApplication::quit();
+// ✅ Quitte Dolphin immédiatement pour permettre la copie
+QCoreApplication::quit();
+
         }, Qt::QueuedConnection);
     });
 
