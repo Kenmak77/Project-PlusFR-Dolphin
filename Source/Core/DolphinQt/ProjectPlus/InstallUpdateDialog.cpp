@@ -941,38 +941,34 @@ void InstallUpdateDialog::install()
             this->accept();
 
 #ifdef _WIN32
-// ⚙️ Script PowerShell pour remplacer tous les fichiers pendant que Dolphin est fermé
-QString psScript = QStringLiteral(R"(
-    $tmp = "%1";
-    $dest = "%2";
+    // ⚙️ Script PowerShell pour déplacer, corriger le backend et relancer Dolphin
+    QString psScript = QStringLiteral(
+        "$tmp = '%1';"
+        "$dest = '%2';"
+        "$fixScript = Join-Path $dest 'fix_backend.ps1';"
+        "Start-Sleep -Milliseconds 500;"
+        "Stop-Process -Name 'Dolphin' -Force -ErrorAction SilentlyContinue;"
+        "Start-Sleep -Milliseconds 300;"
+        "Write-Host '🧩 Déplacement des fichiers vers le dossier final...';"
+        "Get-ChildItem -Path $tmp -Recurse | Move-Item -Destination $dest -Force;"
+        "Remove-Item -Path $tmp -Recurse -Force;"
+        "if (Test-Path $fixScript) {"
+        "    Write-Host '🔧 Exécution du script de correction backend...';"
+        "    powershell -ExecutionPolicy Bypass -NoProfile -File $fixScript;"
+        "} else {"
+        "    Write-Host '⚠️ Aucun script fix_backend.ps1 trouvé.';"
+        "}"
+        "Start-Process \"$dest\\Dolphin.exe\";"
+    ).arg(QDir::toNativeSeparators(tmpDir),
+          QDir::toNativeSeparators(installationDirectory));
 
-    Start-Sleep -Seconds 1;
+    qDebug().noquote() << QStringLiteral("🚀 Launching PowerShell update finalizer with backend fix...");
 
-    # 🔪 Ferme tout process Dolphin encore actif
-    Get-Process "Dolphin" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue;
-    Start-Sleep -Seconds 1;
-
-    Write-Host "🚚 Moving update files from $tmp to $dest...";
-    robocopy $tmp $dest /E /MOVE /R:3 /W:1 | Out-Null;
-
-    # 🧹 Supprime le dossier temporaire si encore là
-    if (Test-Path $tmp) { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
-
-    Write-Host "✅ Update applied. Restarting Dolphin...";
-    Start-Process "$dest\\Dolphin.exe";
-)") // fin du script inline PowerShell
-.arg(QDir::toNativeSeparators(tmpDir),
-     QDir::toNativeSeparators(installationDirectory));
-
-qDebug().noquote() << QStringLiteral("🚀 Launching PowerShell update finalizer...");
-
-QProcess::startDetached(
-    QStringLiteral("powershell.exe"),
-    QStringList()
-        << QStringLiteral("-NoProfile")
-        << QStringLiteral("-ExecutionPolicy") << QStringLiteral("Bypass")
-        << QStringLiteral("-Command") << psScript
-);
+    QProcess::startDetached(QStringLiteral("powershell"),
+        QStringList()
+            << QStringLiteral("-NoProfile")
+            << QStringLiteral("-ExecutionPolicy") << QStringLiteral("Bypass")
+            << QStringLiteral("-Command") << psScript);
 #else
 // 🐧 Linux/macOS : même principe
 QProcess::startDetached(
