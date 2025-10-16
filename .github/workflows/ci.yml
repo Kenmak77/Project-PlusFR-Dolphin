@@ -113,6 +113,10 @@ jobs:
           key: macOS ccache ${{ steps.ccache_cache_timestamp.outputs.timestamp }}
           restore-keys: macOS ccache
 
+      - name: Patch CMakeLists for Qt6 Network
+        run: |
+         sed -i '' 's/find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg)/find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg Network)/' Source/Core/DolphinQt/CMakeLists.txt
+
       - name: Generate CMake Files
         run: |
           COMMON_ARGS=(
@@ -288,6 +292,9 @@ jobs:
         tar -xvf /tmp/patchelf.tar.gz --directory /tmp/ ./bin/patchelf --strip-components=2 
         sudo mv /tmp/patchelf /usr/bin
         patchelf --version
+    - name: Patch CMakeLists for Qt6 Network
+      run: |
+        sed -i 's/find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg)/find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Svg Network)/' Source/Core/DolphinQt/CMakeLists.txt
     - name: Build Dolphin
       run: |
         export Qt_DIR="${{github.workspace}}/qt/${{ env.yaqti }}/gcc_64/lib/cmake/Qt6"
