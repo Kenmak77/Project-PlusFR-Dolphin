@@ -235,10 +235,10 @@ jobs:
         ref: master
         fetch-depth: 0
 
-    - name: Install Qt 6.7.3
+    - name: Install Qt 6.7.2
       uses: jurplel/install-qt-action@v3
       with:
-        version: '6.7.3'
+        version: '6.7.2'
         host: 'linux'
         target: 'desktop'
         arch: 'gcc_64'
