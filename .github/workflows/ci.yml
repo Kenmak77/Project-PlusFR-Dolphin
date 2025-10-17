@@ -1,3 +1,6 @@
+env:
+  yaqti: 6.6.3
+
 name: Project+ Dolphin Builder
 
 on: [push, pull_request]
@@ -235,10 +238,10 @@ jobs:
         ref: master
         fetch-depth: 0
 
-    - name: Install Qt 6.7.2
+    - name: Install Qt 6.6.3
       uses: jurplel/install-qt-action@v3
       with:
-        version: '6.7.2'
+        version: '6.6.3'
         host: 'linux'
         target: 'desktop'
         arch: 'gcc_64'
