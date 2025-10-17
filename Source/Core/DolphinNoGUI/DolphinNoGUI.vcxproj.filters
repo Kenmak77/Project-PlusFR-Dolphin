@@ -5,6 +5,7 @@
     <ClCompile Include="PlatformHeadless.cpp" />
     <ClCompile Include="MainNoGUI.cpp" />
     <ClCompile Include="PlatformWin32.cpp" />
+    <ClCompile Include="..\DolphinQt\ProjectPlus\InstallUpdateDialog.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Platform.h" />

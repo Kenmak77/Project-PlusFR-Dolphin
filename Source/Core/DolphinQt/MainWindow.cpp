@@ -39,7 +39,11 @@
 #endif
 
 #ifndef _WIN32
+#if defined(Q_OS_LINUX)
+#include <QtGui/private/qplatformnativeinterface_p.h>
+#else
 #include <qpa/qplatformnativeinterface.h>
+#endif
 #endif
 
 #include "Common/Config/Config.h"

@@ -35,6 +35,7 @@
   <Import Project="$(ExternalsDir)cpp-optparse\exports.props" />
   <Import Project="$(ExternalsDir)fmt\exports.props" />
   <ItemGroup>
+    <ClCompile Include="..\DolphinQt\ProjectPlus\InstallUpdateDialog.cpp" />
     <ClCompile Include="MainNoGUI.cpp" />
     <ClCompile Include="Platform.cpp" />
     <ClCompile Include="PlatformHeadless.cpp" />
