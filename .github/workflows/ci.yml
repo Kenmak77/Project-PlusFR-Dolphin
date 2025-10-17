@@ -242,7 +242,6 @@ jobs:
         host: 'linux'
         target: 'desktop'
         arch: 'gcc_64'
-        modules: 'qtbase qttools qtdeclarative qtshadertools'
 
     - name: Install Qt6 dependencies
       run: |
