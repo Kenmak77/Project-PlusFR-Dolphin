@@ -26,6 +26,7 @@
 #include <QDebug>
 #include <QIODevice>
 
+
 #include <fmt/format.h>
 
 #include <future>
@@ -38,9 +39,13 @@
 #include "QtUtils/SignalDaemon.h"
 #endif
 
-#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+#if defined(Q_OS_LINUX)
+#include <QGuiApplication>
+#include <qpa/qplatformnativeinterface.h>  // ✅ uniquement Linux (pas macOS)
+#elif defined(Q_OS_MACOS)
 #include <QGuiApplication>
 #endif
+
 
 #include "Common/Config/Config.h"
 #include "Common/ScopeGuard.h"
