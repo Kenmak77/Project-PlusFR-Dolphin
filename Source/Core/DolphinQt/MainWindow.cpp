@@ -38,12 +38,8 @@
 #include "QtUtils/SignalDaemon.h"
 #endif
 
-#ifndef _WIN32
-#if defined(Q_OS_LINUX)
-#include <QtGui/private/qplatformnativeinterface_p.h>
-#else
-#include <qpa/qplatformnativeinterface.h>
-#endif
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+#include <QGuiApplication>
 #endif
 
 #include "Common/Config/Config.h"
@@ -212,16 +208,19 @@ static WindowSystemInfo GetWindowSystemInfo(QWindow* window)
   wsi.render_window = window ? reinterpret_cast<void*>(window->winId()) : nullptr;
   wsi.render_surface = wsi.render_window;
 #else
-  QPlatformNativeInterface* pni = QGuiApplication::platformNativeInterface();
-  wsi.display_connection = pni->nativeResourceForWindow("display", window);
+  // Works on Linux (X11 + Wayland) using public API only
+  auto* pni = QGuiApplication::platformNativeInterface();
+  wsi.display_connection = pni ? pni->nativeResourceForWindow("display", window) : nullptr;
+
   if (wsi.type == WindowSystemType::Wayland)
     wsi.render_window = window ? pni->nativeResourceForWindow("surface", window) : nullptr;
   else
     wsi.render_window = window ? reinterpret_cast<void*>(window->winId()) : nullptr;
+
   wsi.render_surface = wsi.render_window;
 #endif
-  wsi.render_surface_scale = window ? static_cast<float>(window->devicePixelRatio()) : 1.0f;
 
+  wsi.render_surface_scale = window ? static_cast<float>(window->devicePixelRatio()) : 1.0f;
   return wsi;
 }
 
@@ -1332,14 +1331,16 @@ void MainWindow::ShowSettingsWindow()
   if (!m_settings_window)
   {
 #ifdef HAVE_XRANDR
-    if (GetWindowSystemType() == WindowSystemType::X11)
-    {
-      m_xrr_config = std::make_unique<X11Utils::XRRConfiguration>(
-          static_cast<Display*>(QGuiApplication::platformNativeInterface()->nativeResourceForWindow(
-              "display", windowHandle())),
-          winId());
-    }
+if (GetWindowSystemType() == WindowSystemType::X11)
+{
+  m_xrr_config = std::make_unique<X11Utils::XRRConfiguration>(
+      static_cast<Display*>(QGuiApplication::platformNativeInterface()->nativeResourceForWindow(
+          "display", windowHandle())),
+      winId());
+}
 #endif
+
+
     m_settings_window = new SettingsWindow(this);
     InstallHotkeyFilter(m_settings_window);
   }
