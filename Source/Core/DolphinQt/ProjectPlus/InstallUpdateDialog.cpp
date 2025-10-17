@@ -3,7 +3,6 @@
 *  Credit to the Mario Party Netplay team for the base code of this updater
 *  Copyright (C) 2025 Tabitha Hanegan
 */
-#define QT_NO_CAST_FROM_ASCII
 
 #include "Common/MinizipUtil.h"
 #include "InstallUpdateDialog.h"
@@ -981,7 +980,6 @@ QProcess::startDetached(
      QStringLiteral("sleep 1 && mv -f '%1'/* '%2'/ && rm -rf '%1' && '%2'/Dolphin &")
          .arg(temporaryDirectory)
          .arg(installationDirectory)});
-);
 #endif
 
 // ✅ Quitte Dolphin immédiatement pour permettre la copie
