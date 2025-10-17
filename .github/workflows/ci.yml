@@ -235,6 +235,15 @@ jobs:
         ref: master
         fetch-depth: 0
 
+    - name: Install Qt 6.7.3
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '6.7.3'
+        host: 'linux'
+        target: 'desktop'
+        arch: 'gcc_64'
+        modules: 'qtbase qttools qtdeclarative qtshadertools'
+
     - name: Install Qt6 dependencies
       run: |
        sudo apt update
@@ -306,48 +315,48 @@ jobs:
         cp -P build/install/usr/bin/project-plus-dolphin $GITHUB_WORKSPACE/artifacts
     - name: Package Dolphin-AppImage
       env:
-        QT_BASE_DIR: /qt/${{ env.yaqti }}/gcc_64
-        QTDIR: $QT_BASE_DIR
+        QT_BASE_DIR: /opt/Qt/${{ env.yaqti }}/gcc_64
+        QTDIR: /opt/Qt/${{ env.yaqti }}/gcc_64
       run: |
-        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${GITHUB_WORKSPACE}/qt/${{ env.yaqti }}/gcc_64/lib/
         export PATH=$QT_BASE_DIR/bin:$PATH
-        echo "PATH $PATH"
-        sudo ln -s ${GITHUB_WORKSPACE}/$(find qt/ -name qmake) /usr/bin
+        export LD_LIBRARY_PATH=$QT_BASE_DIR/lib:$LD_LIBRARY_PATH
+        echo "✅ Qt path: $QT_BASE_DIR"
         qmake -v
+
         cd /tmp 
         curl -sSfLO "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
         curl -sSfLO "https://github.com/AppImage/AppImageUpdate/releases/download/continuous/AppImageUpdate-x86_64.AppImage"
-        chmod a+x linuxdeploy*.AppImage
-        chmod a+x AppImageUpdate-x86_64.AppImage
+        chmod a+x linuxdeploy*.AppImage AppImageUpdate-x86_64.AppImage
         ./linuxdeploy-x86_64.AppImage --appimage-extract
-        curl -sSfL "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage" -o /tmp/squashfs-root/usr/bin/linuxdeploy-plugin-qt.AppImage
+
+        curl -sSfL "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage" \
+          -o /tmp/squashfs-root/usr/bin/linuxdeploy-plugin-qt.AppImage
         chmod a+x /tmp/squashfs-root/usr/bin/linuxdeploy-plugin-qt.AppImage
+
         mv /tmp/squashfs-root/usr/bin/patchelf /tmp/squashfs-root/usr/bin/patchelf.orig
         sudo cp /usr/bin/patchelf /tmp/squashfs-root/usr/bin/patchelf
+
         cd $GITHUB_WORKSPACE
         mkdir -p squashfs-root
-        cp -a build/install/usr $GITHUB_WORKSPACE/squashfs-root/
-        cp Data/project-plus-dolphin.svg ./squashfs-root/project-plus-dolphin.svg
-        cp Data/project-plus-dolphin.desktop ./squashfs-root/project-plus-dolphin.desktop
-        curl -sSfL https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-x86_64 -o ./squashfs-root/runtime
-        curl -sSfL "https://github.com/RPCS3/AppImageKit-checkrt/releases/download/continuous2/AppRun-patched-x86_64" -o ./squashfs-root/AppRun-patched
-        cp ci/Distribution/appimage/{AppRun,update.sh} ./squashfs-root/
-        mv /tmp/AppImageUpdate-x86_64.AppImage ./squashfs-root/usr/bin/AppImageUpdate
-        echo ${{ env.DOLPHINVER }} > ./squashfs-root/version.txt
-        chmod a+x ./squashfs-root/AppRun
-        chmod a+x ./squashfs-root/runtime
-        chmod a+x ./squashfs-root/AppRun-patched
-        chmod a+x ./squashfs-root/update.sh
+        cp -a build/install/usr squashfs-root/
+        cp Data/project-plus-dolphin.svg squashfs-root/
+        cp Data/project-plus-dolphin.desktop squashfs-root/
+        curl -sSfL https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-x86_64 -o squashfs-root/runtime
+        curl -sSfL "https://github.com/RPCS3/AppImageKit-checkrt/releases/download/continuous2/AppRun-patched-x86_64" -o squashfs-root/AppRun-patched
+        cp ci/Distribution/appimage/{AppRun,update.sh} squashfs-root/
+        mv /tmp/AppImageUpdate-x86_64.AppImage squashfs-root/usr/bin/AppImageUpdate
+        echo ${{ env.DOLPHINVER }} > squashfs-root/version.txt
+        chmod +x squashfs-root/AppRun squashfs-root/runtime squashfs-root/AppRun-patched squashfs-root/update.sh
+
         export UPD_INFO="gh-releases-zsync|Project-Plus-Development-Team|Project-Plus-Dolphin|continuous|Project+_Dolphin-x86_64.AppImage.zsync"
-        /tmp/squashfs-root/AppRun --appdir="$GITHUB_WORKSPACE"/squashfs-root/ --plugin qt -d "$GITHUB_WORKSPACE"/squashfs-root/project-plus-dolphin.desktop -i "$GITHUB_WORKSPACE"/squashfs-root/project-plus-dolphin.svg \
-        --exclude-library=libglib* --output appimage
-        ls . | grep *.AppImage
-        mv $(ls . | grep *.AppImage) $GITHUB_WORKSPACE/artifacts
-        ls -al $GITHUB_WORKSPACE/artifacts
-        sed -i 's/AppRun.wrapped/AppRun-patched/g' "$GITHUB_WORKSPACE"/squashfs-root/AppRun
-        cat "$GITHUB_WORKSPACE"/squashfs-root/AppRun
-        /tmp/squashfs-root/usr/bin/linuxdeploy-plugin-appimage --appdir="$GITHUB_WORKSPACE"/squashfs-root/
-        ls . | grep *.AppImage
+        /tmp/squashfs-root/AppRun --appdir="$GITHUB_WORKSPACE/squashfs-root/" --plugin qt \
+          -d "$GITHUB_WORKSPACE/squashfs-root/project-plus-dolphin.desktop" \
+          -i "$GITHUB_WORKSPACE/squashfs-root/project-plus-dolphin.svg" \
+          --exclude-library=libglib* --output appimage
+
+        mv $(ls . | grep .AppImage$) $GITHUB_WORKSPACE/artifacts/
+        sed -i 's/AppRun.wrapped/AppRun-patched/g' "$GITHUB_WORKSPACE/squashfs-root/AppRun"
+        /tmp/squashfs-root/usr/bin/linuxdeploy-plugin-appimage --appdir="$GITHUB_WORKSPACE/squashfs-root/"
         mv Project+_Dolphin-x86_64.AppImage $GITHUB_WORKSPACE/uploads/Dolphin_${DOLPHINVER}.AppImage
         ls -al $GITHUB_WORKSPACE/uploads
       continue-on-error: true
