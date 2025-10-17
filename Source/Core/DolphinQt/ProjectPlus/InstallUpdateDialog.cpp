@@ -976,11 +976,10 @@ QProcess::startDetached(
 #else
 // 🐧 Linux/macOS : même principe
 QProcess::startDetached(
-    QStringLiteral("/bin/sh"),
-    QStringList()
-        << QStringLiteral("-c")
-        QString::fromUtf8("sleep 1 && mv -f '%1'/* '%2'/ && rm -rf '%1' && '%2'/Dolphin &")
-               .arg(tmpDir, installationDirectory)
+    "/bin/bash",
+    {"-c", QString("sleep 1 && mv -f '%1'/* '%2'/ && rm -rf '%1' && '%2'/Dolphin &")
+                .arg(temporaryDirectory)
+                .arg(installationDirectory)});
 );
 #endif
 
